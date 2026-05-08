@@ -1,0 +1,88 @@
+name: 更新各种版本worker代码
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10,22 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-workers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Process Workers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USER_NAME: "wanwushequ"
+        run: |
+          # 仓库名 | 分支 | 目标路径
+          WORKERS_CONFIG=(
+            "cmliu-edgetunnel-2.1|main|workers/cm/2.1/_worker.js"
+            "cmliu-edgetunnel-2.0|main|workers/cm/2.0/_worker.js"
+            "byJoey-cfnew-2.9.6|main|workers/bj/2.9.6/_worker.js"
+            "BPB-Worker-Panel-4.1.3|main|workers/bpb/4.1.3/_worker.js"
+            "6Kmfi6HP-EDtunnel-2.0.0|main|workers/3k/2.0.0/_worker.js"
+          )
+
+          for item in "${WORKERS_CONFIG[@]}"; do
+            IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
+            
+            # 拼接
+            RAW_URL="https://raw.githubusercontent.com/${USER_NAME}/${REPO_NAME}/refs/heads/${BRANCH}/_worker.js"
+            API_URL="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/contents/_worker.js"
+
+            echo "开始处理: $REPO_NAME -> $DEST_PATH"
+
+            # 获取 Hash 并重试
+            EXPECTED_SHA=""
+            for i in {1..3}; do
+              EXPECTED_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" "$API_URL" | jq -r '.sha' || echo "")
+              [ "$EXPECTED_SHA" != "null" ] && [ -n "$EXPECTED_SHA" ] && break
+              sleep 5
+            done
+
+            if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" == "null" ]; then
+              echo "跳过：无法获取 $REPO_NAME 的 Hash"
+              continue
+            fi
+
+            # 下载
+            mkdir -p "$(dirname "$DEST_PATH")"
+            curl -L -s -o "$DEST_PATH" "$RAW_URL"
+
+            # 计算 Git Blob SHA
+            LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+
+            # 校验
+            if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
+              echo "Hash 不匹配，跳过 $REPO_NAME"
+              git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
+              continue
+            fi
+            echo "校验通过。"
+          done
+
+          # 提交变更
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add workers/
+
+          # 提交日志
+          if ! git diff --staged --quiet; then
+            echo "-------------------------------------------------------"
+            echo "检测到内容更新，本次更新覆盖的文件路径如下："
+            git diff --staged --name-only
+            echo "-------------------------------------------------------"
+            
+            NOW=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+            git commit -m "$(date '+%Y-%m-%d %H:%M')"
+            git push origin HEAD:${{ github.ref }}
+            echo "提交执行完毕。"
+          else
+            echo "所有文件均未发生变化，无需提交。"
+          fi
